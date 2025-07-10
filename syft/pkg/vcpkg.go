@@ -61,7 +61,7 @@ type VcpkgManifest struct {
 type VcpkgDependency struct {
 	DefaultFeatures bool                 `json:"default-features,omitempty"`
 	Features        []VcpkgFeatureObject `json:"features,omitempty"`
-	Host            bool                 `json:"host:"host,omitempty"`
+	Host            bool                 `json:"host,omitempty"`
 	Name            string               `json:"name"`
 	// A "Platform Expression" that limits the platforms where the feature is required. Optional
 	Platform   string `json:"platform,omitempty"`
@@ -145,4 +145,9 @@ type VcpkgTreeNode struct {
 	Sha  string `json:"sha"`
 	Size int    `json:"size"`
 	Url  string `json:"url"`
+}
+
+type VcpkgLock struct {
+	Repo string
+	Head string
 }

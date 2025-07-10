@@ -46,6 +46,7 @@ func NewResolver(cfg pkg.VcpkgConfig) *Resolver {
 	}
 }
 
+// Copy of cache resolver in java cataloger.
 // cacheResolveReader attempts to get a reader from cache, otherwise caches the contents of the resolve() function.
 // this function is guaranteed to return an unread reader for the correct contents.
 // NOTE: this could be promoted to the internal cache package as a specialized version of the cache.Resolver
@@ -101,12 +102,9 @@ func (r *Resolver) FindManifestsInRemoteRepository(ctx context.Context, dependen
 	manNodes := []ManifestNode{}
 
 	if r.cfg.DefaultRegistry.Repository != "" {
-		client := http.Client{
-			Timeout: r.remoteRequestTimeout,
-		}
-		vcpkg, err := findPortManifest(client, r.cfg.DefaultRegistry.Repository, name, version, head, defaultFeatures, features, parent)
+		vcpkg, err := r.findPortManifest(ctx, name, version, head, defaultFeatures, features, parent)
 		if err != nil {
-			return nil, fmt.Errorf("vcpkg.json not found")
+			return nil, fmt.Errorf("vcpkg.json not found. %w", err)
 		}
 		manNode := ManifestNode{
 			Parent: parent,
@@ -118,149 +116,43 @@ func (r *Resolver) FindManifestsInRemoteRepository(ctx context.Context, dependen
 				childManNodes, err := r.FindManifestsInRemoteRepository(ctx, dep, head, df, &vcpkg)
 				manNodes = append(manNodes, childManNodes...)
 				if err != nil {
-					return nil, fmt.Errorf("vcpkg.json not found")
+					return nil, fmt.Errorf("could not find vcpkg.json file for dependency. %w", err)
 				}
 			}
 		}
 		return manNodes, nil
 	}
 
-	return nil, fmt.Errorf("vcpkg.json not found")
+	return nil, fmt.Errorf("Could not find a vcpkg registry to search for manifests")
 }
 
-
-
-// returns the raw github vcpkg.json file content from the
-func findPortManifest(client http.Client, repo, name, version, head string, df bool, features []interface{}, parent *pkg.VcpkgManifest) (pkg.VcpkgManifest, error) {
-	vParts := strings.Split(version, "#")
+// looks up the vcpkg.json from (a.k.a the manifest file)
+func (r *Resolver) findPortManifest(ctx context.Context, name, ver, head string, df bool, features []interface{}, parent *pkg.VcpkgManifest) (pkg.VcpkgManifest, error) {
 	var resultVcpkg pkg.VcpkgManifest
+	var err error
+	rawRepo := strings.Replace(r.cfg.DefaultRegistry.Repository, "github.com", "raw.githubusercontent.com", 1)
 
-	rawRepo := strings.Replace(repo, "github.com", "raw.githubusercontent.com", 1)
-	if name == "" {
-		return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-	}
-	if head == "" {
-		return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-	}
-	if version != "" {
-		requestURL := rawRepo + "/" + head + "/versions/" + name[0:1] + "-/" + name + ".json"
-		req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	// if version is present, lookup is more complicated 
+	// Also requires use of github api, so custom vcpkg git registries from other vendors won't work 
+	if ver != "" {
+		gitTree, err := r.resolveGitTreeSha(ctx, rawRepo, head, name, ver)
 		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
+			return pkg.VcpkgManifest{}, fmt.Errorf("could not find versions json file. head->%v name->%v version->%v. %w", head, name, ver, err)
 		}
-		resp, err := client.Do(req)
+		blobObjURL, err := r.resolveGitObjectSha(ctx, gitTree)
 		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
+			return pkg.VcpkgManifest{}, fmt.Errorf("could not find blob URL for port. head->%v name->%v version->%v. %w", head, name, ver, err)
 		}
-		if resp.StatusCode == http.StatusNotFound {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		body, err := io.ReadAll(resp.Body)
-		var versions []pkg.VcpkgPortVersion
-		verErr := json.Unmarshal(body, &versions)
-		if verErr != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		var gitTree string
-		for _, v := range versions {
-			if len(vParts) > 1 {
-				portV, err := strconv.Atoi(vParts[1])
-				if err != nil {
-					continue
-				}
-				if v.Version == vParts[0] && v.PortVersion == portV {
-					gitTree = v.GitTree
-					break
-				}
-			} else {
-				if v.Version == vParts[0] {
-					gitTree = v.GitTree
-					break
-				}
-			}
-		}
-		if gitTree == "" {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-
-		// github api tree object request
-		apiRepo := strings.Replace(repo, "github.com", "api.github.com/repos", 1)
-		apiTreeReqURL := apiRepo + "/git/trees/" + gitTree
-		apiTreeReq, err := http.NewRequest(http.MethodGet, apiTreeReqURL, nil)
+		resultVcpkg, err = r.resolveBlobToManifest(ctx, blobObjURL)
 		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
+			return resultVcpkg, err
 		}
-		apiTreeResp, err := client.Do(apiTreeReq)
-		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		if apiTreeResp.StatusCode == http.StatusNotFound {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		apiTreeBody, err := io.ReadAll(apiTreeResp.Body)
-		var treeObj pkg.VcpkgTreeObject
-		apiTreeErr := json.Unmarshal(apiTreeBody, &treeObj)
-		if apiTreeErr != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		var blobObjUrl string
-		for _, t := range treeObj.Tree {
-			if t.Path == "vcpkg.json" {
-				blobObjUrl = t.Url
-			}
-		}
-		if blobObjUrl == "" {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-
-		// github api blob object request
-		apiBlobReq, err := http.NewRequest(http.MethodGet, blobObjUrl, nil)
-		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		apiBlobResp, err := client.Do(apiBlobReq)
-		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		if apiBlobResp.StatusCode == http.StatusNotFound {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		apiBlobBody, err := io.ReadAll(apiBlobResp.Body)
-		var blobObj pkg.VcpkgBlobObject
-		apiBlobErr := json.Unmarshal(apiBlobBody, &blobObj)
-		if apiBlobErr != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		encodedCont := strings.ReplaceAll(blobObj.Content, "\n", "")
-		decodedCont, err := base64.StdEncoding.DecodeString(encodedCont)
-		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		var blobVcpkg pkg.VcpkgManifest
-		json.Unmarshal([]byte(decodedCont), &blobVcpkg)
-
-		resultVcpkg = blobVcpkg
 	} else {
 		requestURL := rawRepo + "/" + head + "/ports/" + name + "/vcpkg.json"
-		req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+		resultVcpkg, err = r.resolveManifest(ctx, requestURL)
 		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
+			return resultVcpkg, err
 		}
-		resp, err := client.Do(req)
-		if err != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		if resp.StatusCode == http.StatusNotFound {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-		respBody, err := io.ReadAll(resp.Body)
-		var vcpkgMan pkg.VcpkgManifest
-		vmErr := json.Unmarshal(respBody, &vcpkgMan)
-		if vmErr != nil {
-			return pkg.VcpkgManifest{}, fmt.Errorf("vcpkg.json not found")
-		}
-
-		resultVcpkg = vcpkgMan
 	}
 
 	for _, feature := range features {
@@ -282,6 +174,144 @@ func findPortManifest(client http.Client, repo, name, version, head string, df b
 	return resultVcpkg, nil
 }
 
+// simply looks up the raw vcpkg.json file at requestURL
+func (r *Resolver) resolveManifest(ctx context.Context, requestURL string) (pkg.VcpkgManifest, error) {
+	cacheKey := strings.TrimPrefix(strings.TrimPrefix(requestURL, "http://"), "https://")
+	reader, err := r.cacheResolveReader(cacheKey, func() (io.ReadCloser, error) {
+		return getReqToCloser(requestURL, ctx, r.remoteRequestTimeout)
+	})
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("failed to resolve vcpkg.json %v, %w", requestURL, err)
+	}
+	manBytes, err := io.ReadAll(reader) 
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("could not read bytes for vcpkg.json. %w", err)
+	}
+	var resultVcpkg pkg.VcpkgManifest
+	err = json.Unmarshal(manBytes, &resultVcpkg)
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("could not convert vcpkg.json into VcpkgManifest struct. %w", err)
+	}
+
+	return resultVcpkg, nil
+}
+
+// Look up blob object and decode the contents. See https://docs.github.com/en/rest/git/blobs?apiVersion=2022-11-28
+func (r *Resolver) resolveBlobToManifest(ctx context.Context, blobObjURL string) (pkg.VcpkgManifest, error) {
+	cacheKey := strings.TrimPrefix(strings.TrimPrefix(blobObjURL, "http://"), "https://")
+	reader, err := r.cacheResolveReader(cacheKey, func() (io.ReadCloser, error) {
+		return getReqToCloser(blobObjURL, ctx, r.remoteRequestTimeout)
+	})
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("failed to resolve vcpkg.json blob %v, %w", blobObjURL, err)
+	}
+	manBytes, err := io.ReadAll(reader) 
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("could not read bytes for vcpkg.json blob. %w", err)
+	}
+	var blobObj pkg.VcpkgBlobObject
+	err = json.Unmarshal(manBytes, &blobObj)
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("could not convert vcpkg.json into VcpkgBlobObject struct. %w", err)
+	}
+	encodedCont := strings.ReplaceAll(blobObj.Content, "\n", "")
+	decodedCont, err := base64.StdEncoding.DecodeString(encodedCont)
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("failed to decode base64 content to byte array. %w", err)
+	}
+	var blobVcpkg pkg.VcpkgManifest
+	err = json.Unmarshal([]byte(decodedCont), &blobVcpkg)
+	if err != nil {
+		return pkg.VcpkgManifest{}, fmt.Errorf("failed to unmarshal byte array to VcpkgManifest struct. %w", err)
+	}
+
+	return blobVcpkg, nil
+}
+
+
+// find blob object sha via api call to github.  
+// https://docs.github.com/en/rest/git/trees?apiVersion=2022-11-28 
+func (r *Resolver) resolveGitObjectSha(ctx context.Context, gitTree string) (string, error) {
+	apiRepo := strings.Replace(r.cfg.DefaultRegistry.Repository, "github.com", "api.github.com/repos", 1)
+	apiTreeReqURL := apiRepo + "/git/trees/" + gitTree
+	cacheKey := strings.TrimPrefix(strings.TrimPrefix(apiTreeReqURL, "http://"), "https://")
+	reader, err := r.cacheResolveReader(cacheKey, func() (io.ReadCloser, error) {
+		return getReqToCloser(apiTreeReqURL, ctx, r.remoteRequestTimeout)
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve vcpkg.json %v, %w", apiTreeReqURL, err)
+	}
+	atrBytes, err := io.ReadAll(reader) 
+	if err != nil {
+		return "", fmt.Errorf("could not read bytes for vcpkg.json. %w", err)
+	}
+	var treeObj pkg.VcpkgTreeObject
+	err = json.Unmarshal(atrBytes, &treeObj)
+	if err != nil {
+		return "", fmt.Errorf("could not convert vcpkg.json into VcpkgManifest struct. %w", err)
+	}
+	var blobObjUrl string
+	for _, t := range treeObj.Tree {
+		if t.Path == "vcpkg.json" {
+			blobObjUrl = t.Url
+		}
+	}
+	if blobObjUrl == "" {
+		return "", fmt.Errorf("could not find vcpkg.json blob at tree url. %v", apiTreeReqURL)
+	}
+	return blobObjUrl, nil 
+}
+
+
+// find versions file from registry for port 
+func (r *Resolver) resolveGitTreeSha(ctx context.Context, rawRepo, head, name, ver string) (string, error) {
+	vParts := strings.Split(ver, "#")
+	verReqURL := rawRepo + "/" + head + "/versions/" + name[0:1] + "-/" + name + ".json"
+	cacheKey := strings.TrimPrefix(strings.TrimPrefix(verReqURL, "http://"), "https://")
+	reader, err := r.cacheResolveReader(cacheKey, func() (io.ReadCloser, error) {
+		return getReqToCloser(verReqURL, ctx, r.remoteRequestTimeout)
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve vcpkg.json %v, %w", verReqURL, err)
+	}
+	if reader, ok := reader.(io.Closer); ok {
+		defer internal.CloseAndLogError(reader, verReqURL)
+	}
+	verBytes, err := io.ReadAll(reader) 
+	if err != nil {
+		return "", fmt.Errorf("could not read bytes for vcpkg.json. %w", err)
+	}
+	var versions []pkg.VcpkgPortVersion
+	err = json.Unmarshal(verBytes, &versions)
+	if err != nil {
+		return "", fmt.Errorf("could not convert vcpkg.json into VcpkgManifest struct. %w", err)
+	}
+
+	// get tree object sha for the port version
+	var gitTree string
+	for _, v := range versions {
+		if len(vParts) > 1 {
+			portV, err := strconv.Atoi(vParts[1])
+			if err != nil {
+				continue
+			}
+			if v.Version == vParts[0] && v.PortVersion == portV {
+				gitTree = v.GitTree
+				break
+			}
+		} else {
+			if v.Version == vParts[0] {
+				gitTree = v.GitTree
+				break
+			}
+		}
+	}	
+	if gitTree == "" {
+		return "", fmt.Errorf("could not identify a git tree sha for vcpkg.json from url %v. version %v", verReqURL, ver)
+	}
+	return gitTree, nil
+}
+
 func isDefaultFeature(name string, defaultFeatures []interface{}) bool {
 	for _, df := range defaultFeatures {
 		switch d := df.(type) {
@@ -296,4 +326,29 @@ func isDefaultFeature(name string, defaultFeatures []interface{}) bool {
 		}
 	}
 	return false
+}
+
+func getReqToCloser(requestURL string, ctx context.Context, to time.Duration) (io.ReadCloser, error) {
+	if requestURL == "" {
+		return nil, fmt.Errorf("vcpkg request URL cannot be blank")
+	}
+	req, err := http.NewRequest(http.MethodGet, requestURL, nil)
+	if err != nil {
+		return nil, fmt.Errorf("unable to create request for vcpkg: %w", err)
+	}
+
+	req = req.WithContext(ctx)
+
+	client := http.Client{
+		Timeout: to,
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("unable to get manifest from vcpkg registry %v: %w", requestURL, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("manifest not found in vcpkg registry at: %v", requestURL)
+	}
+	return resp.Body, err
 }

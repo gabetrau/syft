@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 
+	"github.com/anchore/syft/internal"
 	"github.com/anchore/syft/syft/artifact"
 	"github.com/anchore/syft/syft/file"
 	"github.com/anchore/syft/syft/pkg"
@@ -16,18 +17,18 @@ import (
 
 var _ generic.Parser = parseVcpkgmanifest
 
-var defaultRegistry = pkg.VcpkgRegistry{
-	Kind:       pkg.Git,
-	Repository: "https://github.com/microsoft/vcpkg",
-}
 
 func parseVcpkgmanifest(ctx context.Context, resolver file.Resolver, _ *generic.Environment, reader file.LocationReadCloser) ([]pkg.Package, []artifact.Relationship, error) {
-	head := findLockFileHead()
+	lockRecords := findLockFileHead(resolver)
 	r := vcpkg.NewResolver(
 		pkg.VcpkgConfig{
-			DefaultRegistry: defaultRegistry,
+			DefaultRegistry: pkg.VcpkgRegistry{
+				Kind: pkg.Git,
+				Repository: lockRecords[0].Repo,
+			},
 		},
 	)
+	head := lockRecords[0].Head
 
 	// find full manifests for all dependencies
 	var pkgs []pkg.Package
@@ -46,6 +47,7 @@ func parseVcpkgmanifest(ctx context.Context, resolver file.Resolver, _ *generic.
 			pkgs,
 			oPkg)
 
+		
 		for _, dep := range pMan.Dependencies {
 			cMans, fetchErr := r.FindManifestsInRemoteRepository(ctx, dep, head, true, &pMan)
 			if fetchErr != nil {
@@ -77,6 +79,46 @@ func parseVcpkgmanifest(ctx context.Context, resolver file.Resolver, _ *generic.
 	return pkgs, relationships, nil
 }
 
-func findLockFileHead() string {
-	return "0cb95c860ea83aafc1b24350510b30dec535989a"
+func findLockFileHead(resolver file.Resolver) []pkg.VcpkgLock {
+	loc, err := resolver.FilesByGlob("**/vcpkg-lock.json")
+	if err != nil || len(loc) == 0 {
+		// may want to throw an error here if a vcpkg-lock.json file is not present
+		return []pkg.VcpkgLock{
+			pkg.VcpkgLock{
+				Repo: "https://github.com/microsoft/vcpkg",
+				Head: "master",
+			},
+		}
+	}
+	lockContents, err := resolver.FileContentsByLocation(loc[0])
+	if err != nil || lockContents == nil {
+		return []pkg.VcpkgLock{
+			pkg.VcpkgLock{
+				Repo: "https://github.com/microsoft/vcpkg", 
+				Head: "master",
+			},
+		}
+	}
+	defer internal.CloseAndLogError(lockContents, loc[0].RealPath)
+	lockBytes, err := io.ReadAll(lockContents)
+
+	var lockFile interface{} 
+	json.Unmarshal(lockBytes, &lockFile)
+
+	var lockRecords []pkg.VcpkgLock
+	for k, v := range lockFile.(map[string]interface{}) {
+		switch t := v.(type) {
+		case map[string]interface{}:
+			for _, v2 := range t {
+				switch t2 := v2.(type) {
+				case string:
+					lockRecords = append(lockRecords, pkg.VcpkgLock{
+						Repo: k,
+						Head: t2,
+					})
+				}
+			}
+		}
+	}
+	return lockRecords 
 }
