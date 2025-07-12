@@ -1,7 +1,6 @@
 package pkg
 
 import (
-	"errors"
 	"strconv"
 	"strings"
 )
@@ -11,12 +10,13 @@ type VcpkgRegistryKind string
 const (
 	FileSystem VcpkgRegistryKind = "filesystem"
 	Git        VcpkgRegistryKind = "git"
+	// is just a locally cloned Git repository
 	Builtin    VcpkgRegistryKind = "builtin"
 )
 
 // represents contents of "vcpkg-configuration.json"
 type VcpkgConfig struct {
-	DefaultRegistry VcpkgRegistry   `json:"registry,omitempty"`
+	DefaultRegistry VcpkgRegistry   `json:"default-registry"`
 	OverlayPorts    []string        `json:"overlay-ports,omitempty"`
 	OverlayTriplets []string        `json:"overlay-triplets,omitempty"`
 	Registries      []VcpkgRegistry `json:"registries,omitempty"`
@@ -25,7 +25,7 @@ type VcpkgConfig struct {
 type VcpkgRegistry struct {
 	Baseline   string            `json:"baseline,omitempty"`
 	Kind       VcpkgRegistryKind `json:"kind"`
-	Packages   string            `json:"packages,omitempty"`
+	Packages   []string            `json:"packages,omitempty"`
 	Path       string            `json:"path,omitempty"`
 	Reference  string            `json:"reference,omitempty"`
 	Repository string            `json:"repository,omitempty"`
@@ -34,11 +34,11 @@ type VcpkgRegistry struct {
 // represents contents of "vcpkg.json" file. (a.k.a the manifest file)
 type VcpkgManifest struct {
 	BuiltinBaseline string                  `json:"builtin-baseline,omitempty"`
-	DefaultFeatures  []interface{}    		`json:"default-features,omitempty"`
+	DefaultFeatures  []any    		`json:"default-features,omitempty"`
 	// string or []VcpkgDependency
-	Dependencies    []interface{}           `json:"dependencies,omitempty"`
+	Dependencies    []any           `json:"dependencies,omitempty"`
 	// string or []string
-	Description     interface{}             `json:"description,omitempty"`
+	Description     any             `json:"description,omitempty"`
 	Documentation   string                  `json:"documentation,omitempty"`
 	Features        map[string]VcpkgFeature `json:"features,omitempty"`
 	Homepage        string                  `json:"homepage,omitempty"`
@@ -72,7 +72,7 @@ type VcpkgDependency struct {
 // see https://learn.microsoft.com/en-us/vcpkg/reference/vcpkg-json#feature vs https://learn.microsoft.com/en-us/vcpkg/reference/vcpkg-json#feature-object
 type VcpkgFeature struct {
 	Description  string            `json:"description"`
-	Dependencies []interface{} `json:"dependencies,omitempty"`
+	Dependencies []any `json:"dependencies,omitempty"`
 	// "Platform expression"
 	Supports string `json:"supports,omitempty"`
 	// SPDX license expression
@@ -90,39 +90,92 @@ type VcpkgOverride struct {
 	PortVersion int    `json:"port-version,omitempty"`
 }
 
-func (v VcpkgManifest) GetVersionFromManifest() (string, error) {
-	if v.Version != "" && v.PortVersion != 0 {
-		vElems := []string{v.Version, "#", strconv.Itoa(v.PortVersion)}
-		return strings.Join(vElems, ""), nil
-	} else if v.Version != "" {
-		return v.Version, nil
-	} else if v.VersionSemver != "" && v.PortVersion != 0 {
-		vElems := []string{v.VersionSemver, "#", strconv.Itoa(v.PortVersion)}
-		return strings.Join(vElems, ""), nil
-	} else if v.VersionSemver != "" {
-		return v.VersionSemver, nil
-	} else if v.VersionDate != "" && v.PortVersion != 0 {
-		vElems := []string{v.VersionDate, "#", strconv.Itoa(v.PortVersion)}
-		return strings.Join(vElems, ""), nil
-	} else if v.VersionDate != "" {
-		return v.VersionDate, nil
-	} else if v.VersionString != "" && v.PortVersion != 0 {
-		vElems := []string{v.VersionString, "#", strconv.Itoa(v.PortVersion)}
-		return strings.Join(vElems, ""), nil
-	} else if v.VersionString != "" {
-		return v.VersionString, nil
+func (v VcpkgManifest) GetFullVersion() string {
+	return getFullVersionName(v.Version, v.VersionSemver, v.VersionDate, v.VersionString, v.PortVersion)
+}
+
+func (v VcpkgGitVersionObject) GetFullVersion() string {
+	return getFullVersionName(v.Version, v.VersionSemver, v.VersionDate, v.VersionString, v.PortVersion)
+}
+
+func (v VcpkgFsVersionObject) GetFullVersion() string {
+	return getFullVersionName(v.Version, v.VersionSemver, v.VersionDate, v.VersionString, v.PortVersion)
+}
+
+func (v VcpkgGitVersionObject) GetPopulatedVersion() string {
+	return getPopulatedVersionName(v.Version, v.VersionSemver, v.VersionDate, v.VersionString)
+}
+
+func (v VcpkgFsVersionObject) GetPopulatedVersion() string {
+	return getPopulatedVersionName(v.Version, v.VersionSemver, v.VersionDate, v.VersionString)
+}
+
+func getPopulatedVersionName(version, versionSemver, versionDate, versionString string) string {
+	if version != "" {
+		return version
+	} else if versionSemver != "" {
+		return versionSemver
+	} else if versionDate != "" {
+		return versionDate
+	} else if versionString != "" {
+		return versionString
 	} else {
-		return "", errors.New("unable to determine version from manifest file vcpkg.json")
+		return ""
 	}
 }
 
-type VcpkgPortVersion struct {
+func getFullVersionName(version, versionSemver, versionDate, versionString string, portVersion int) string {
+	if version != "" && portVersion != 0 {
+		vElems := []string{version, "#", strconv.Itoa(portVersion)}
+		return strings.Join(vElems, "")
+	} else if version != "" {
+		return version
+	} else if versionSemver != "" && portVersion != 0 {
+		vElems := []string{versionSemver, "#", strconv.Itoa(portVersion)}
+		return strings.Join(vElems, "")
+	} else if versionSemver != "" {
+		return versionSemver
+	} else if versionDate != "" && portVersion != 0 {
+		vElems := []string{versionDate, "#", strconv.Itoa(portVersion)}
+		return strings.Join(vElems, "")
+	} else if versionDate != "" {
+		return versionDate
+	} else if versionString != "" && portVersion != 0 {
+		vElems := []string{versionString, "#", strconv.Itoa(portVersion)}
+		return strings.Join(vElems, "")
+	} else if versionString != "" {
+		return versionString
+	} else {
+		return ""
+	}
+}
+
+// used to get specific dependency from git history
+type VcpkgGitVersionObject struct {
 	// Sha1 value used to retrieve specific git tree object from Github. https://docs.github.com/en/rest/git/trees?apiVersion=2022-11-28
 	GitTree     string `json:"git-tree"`
-	Version     string `json:"version"`
+	Version     string `json:"version,omitempty"`
+	VersionSemver string `json:"version-semver,omitempty"`
+	VersionDate   string `json:"version-date,omitempty"`
+	VersionString string `json:"version-string,omitempty"`
 	PortVersion int    `json:"port-version"`
 }
 
+// Filesystem VersionObject 
+type VcpkgFsVersionObject struct {
+	Path     string `json:"path"`
+	Version       string `json:"version,omitempty"`
+	VersionSemver string `json:"version-semver,omitempty"`
+	VersionDate   string `json:"version-date,omitempty"`
+	VersionString string `json:"version-string,omitempty"`
+	PortVersion int    `json:"port-version"`
+}
+
+type VcpkgFsVersions struct {
+	Versions []VcpkgFsVersionObject `json:"versions"`
+}
+
+// Git tree object from gh api
 type VcpkgTreeObject struct {
 	Sha       string `json:"sha"`
 	Url       string
@@ -130,6 +183,7 @@ type VcpkgTreeObject struct {
 	Truncated bool            `json:"truncated"`
 }
 
+// Git blob object from gh api
 type VcpkgBlobObject struct {
 	Sha      string `json:"sha"`
 	NodeId   string `json:"node_id"`
@@ -138,6 +192,7 @@ type VcpkgBlobObject struct {
 	Encoding string `json:"base64"`
 }
 
+// Tree node from gh api with info on object it represents
 type VcpkgTreeNode struct {
 	Path string `json:"path"`
 	Mode string `json:"mode"`
@@ -147,7 +202,13 @@ type VcpkgTreeNode struct {
 	Url  string `json:"url"`
 }
 
-type VcpkgLock struct {
+// represents whats found in vcpkg-lock.json. json keys are unknown until build 
+type VcpkgLockRecord struct {
 	Repo string
 	Head string
+}
+
+type VcpkgBaselineVersionObject struct {
+	Baseline string `json:"baseline"`
+	PortVersion int `json:"port-version"`
 }

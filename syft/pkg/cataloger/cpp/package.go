@@ -123,17 +123,16 @@ func packageURLFromConanRef(ref *conanRef) string {
 }
 
 func newVcpkgPackage(ctx context.Context, v pkg.VcpkgManifest, l file.Location) pkg.Package {
-	ver, err := v.GetVersionFromManifest()
-	if err != nil {
-		ver = "UNKNOWN"
-	}
+	ver := v.GetFullVersion()
 
 	p := pkg.Package{
 		Name:      v.Name,
 		Version:   ver,
 		Licenses:  pkg.NewLicenseSet(pkg.NewLicenseFromLocationsWithContext(ctx, v.License, l)),
 		Locations: file.NewLocationSet(l),
-		// https://github.com/package-url/purl-spec/pull/245 lengthy discussion. Doesn't seem like it's going to get added unless purl spec team responds to Vcpkg maintainers concerns
+		// https://github.com/package-url/purl-spec/pull/245 lengthy discussion.
+		// doesn't seem like it's going to get added unless purl spec team responds to Vcpkg maintainers concerns
+		// PURL: ,
 		Language: pkg.CPP,
 		Type:     pkg.VcpkgPkg,
 		Metadata: v,
